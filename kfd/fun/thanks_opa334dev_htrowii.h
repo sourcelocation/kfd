@@ -7,3 +7,4 @@
 #import <Foundation/Foundation.h>
 
 uint64_t funVnodeOverwrite2(char* tofile, char* fromfile);
+uint64_t funVnodeOverwriteWithData(char* to, NSData* data);

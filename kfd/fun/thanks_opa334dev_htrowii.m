@@ -193,3 +193,52 @@ uint64_t funVnodeOverwrite2(char* to, char* from) {
     // Return success or error code
     return 0;
 }
+
+
+#pragma mark overwrite3
+uint64_t funVnodeOverwriteWithData(char* to, NSData* data) {
+    printf("attempting opa's method - writing data\n");
+    
+    int to_file_index = open(to, O_RDONLY);
+    if (to_file_index == -1) return -1;
+    off_t to_file_size = lseek(to_file_index, 0, SEEK_END);
+        
+    const char* from_file_data = [data bytes];
+    off_t from_file_size = [data length];
+    
+    
+    if(to_file_size < from_file_size) {
+        close(to_file_index);
+        printf("[-] File is too big to overwrite!");
+        return -1;
+    }
+
+    //mmap as read only
+    printf("mmap as readonly\n");
+    char* to_file_data = mmap(NULL, to_file_size, PROT_READ, MAP_SHARED, to_file_index, 0);
+    if (to_file_data == MAP_FAILED) {
+        close(to_file_index);
+        // Handle error mapping source file
+        return 0;
+    }
+    
+    // set prot to re-
+    printf("task_get_vm_map -> vm ptr\n");
+    uint64_t vm_ptr = task_get_vm_map(getTask());
+    uint64_t entry_ptr = vm_map_find_entry(vm_ptr, (uint64_t)to_file_data);
+    printf("set prot to rw-\n");
+    vm_map_entry_set_prot(entry_ptr, PROT_READ | PROT_WRITE, PROT_READ | PROT_WRITE);
+    
+    
+    printf("it is writable!!\n");
+    memcpy(to_file_data, from_file_data, from_file_size);
+
+    // Cleanup
+//    munmap(from_file_data, from_file_size);
+    munmap(to_file_data, to_file_size);
+    
+    close(to_file_index);
+
+    // Return success or error code
+    return 0;
+}
